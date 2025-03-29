@@ -110,6 +110,11 @@ func someUsefulThings() {
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
 type User struct {
 	Username string
+	PrivateEKey userlib.PrivateKeyType
+	PublicEKey userlib.PublicKeyType
+	PrivateSKey userlib.PrivateKeyType
+	PublicSKey userlib.PublicKeyType
+
 
 	// You can add other attributes here if you want! But note that in order for attributes to
 	// be included when this struct is serialized to/from JSON, they must be capitalized.
@@ -119,8 +124,13 @@ type User struct {
 	// begins with a lowercase letter).
 }
 
-func getUserUID(usernmae string) uuid.UUID{
-	hash_code :=userlib.Hash
+func getUserUID(username string, password string) uuid.UUID{
+	user_hash_code :=userlib.Hash([]byte(username+password))
+	user_uid, err := uuid.FromBytes(user_hash_code[:16])
+	if err != nil {
+		return nil, err
+	}
+	return user_uid
 }
 
 // NOTE: The following methods have toy (insecure!) implementations.
@@ -131,26 +141,62 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	if (len(username)<=0 or len(password)<=0){
 		return nil, errors.New("invalid usernmae or password")
 	}
-
+	// get user uid
+	var user_uid uuid.UUID:= getUserUID(username, password)
+	var cur_user User
+	cur_user.Username = username
 
 	// check if the username is alreaday in dataStore
 	// but then I need a UUID，so I need to hash it.
 
-	
-	// get uuid, argon2key(username)
-	cur_uuid = argon2key(username)
 	// see if it's in datastore
-	if (userlib.DatastoreGet(cur_uuid).ok):
+	if (userlib.DatastoreGet(user_uid).ok):
 		// if it exists, return error
-		return error
-	// else, put it in the datastore
-	userlib.DatastoreSet(cur_uuid, password)
-	
+		return nil, errors.New(`user {username} already exists`)
 
-	userlib.DatastoreGet()
+	// generate private key
+	publicEKey, privateEKey, err := userlib.PKEKeyGen()
+	if err != nil {
+		return nil, errors.New("error generating PKE key pair")
+	}
+	privateSKey, publicSKey, err := userlib.DSKeyGen()
+	if err != nil {
+		return nil, errors.New("error generating DS key pair")
+	}
 
-	userdata.Username = username
-	return &userdata, nil
+	// set the keys
+	cur_user.PrivateEKey = privateEKey
+	cur_user.PublicEKey = publicEKey
+	cur_user.PrivateSKey = privateSKey
+	cur_user.PublicSKey = publicSKey
+
+	// get the root key using argon2key
+	root_key := argon2key([]byte(password), []byte(username),16)
+
+	// get the enc key and mac key
+	enc_key, err := userlib.HashKDF(root_key, []byte("enc-key"))
+	if err != nil {
+		return nil, errors.New("error generating enc key")
+	}
+	mac_key, err := userlib.HashKDF(root_key, []byte("mac-key"))
+	if err != nil {
+		return nil, errors.New("error generating mac key")
+	}
+
+	// get user bytes
+	user_bytes, err := json.Marshal(cur_user)
+	if err != nil {
+		return nil, errors.New("error marshalling user")
+	}
+
+	// encrypt and mac the user bytes
+	encData := userlib.SymEnc(enc_key, userlib.RandomBytes(16), user_bytes)
+	macData := userlib.HMACEval(mac_key, encData)
+	encData = append(macData, encData...)
+
+	// store
+	userlib.DatastoreSet(user_uid, encData)
+	return &cur_user, nil
 }
 
 func GetUser(username string, password string) (userdataptr *User, err error) {
